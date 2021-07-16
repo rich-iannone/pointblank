@@ -288,6 +288,23 @@ get_dbi_column_qtile_stats <- function(data_column) {
     as.list()
 }
 
+get_table_column_nchar_stats <- function(data_column) {
+  
+  data_column %>%
+    dplyr::mutate_all(.funs = nchar) %>%
+    dplyr::rename(nchar = 1) %>%
+    dplyr::summarize_all(
+      .funs = list(
+        mean = ~ mean(., na.rm = TRUE),
+        min = ~ min(., na.rm = TRUE),
+        max = ~ max(., na.rm = TRUE)
+      )
+    ) %>%
+    dplyr::collect() %>%
+    dplyr::mutate_all(.funs = as.numeric) %>%
+    as.list()
+}
+
 # Get a ggplot2 histogram plot of character lengths for a table column
 # (must be a table with a single column)
 # - works across all supported data sources
