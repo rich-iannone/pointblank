@@ -8,6 +8,7 @@ from pointblank._interrogation import (
     ColValsCompareSet,
     ColValsRegex,
     ColExistsHasType,
+    RowsDistinct,
 )
 
 
@@ -21,7 +22,31 @@ def tbl_pl():
     return pl.DataFrame({"x": [1, 2, 3, 4], "y": ["4", "5", "6", "7"], "z": [8, 8, 8, 8]})
 
 
+@pytest.fixture
+def tbl_pd_distinct():
+    return pd.DataFrame(
+        {
+            "col_1": ["a", "b", "c", "d"],
+            "col_2": ["a", "a", "c", "d"],
+            "col_3": ["a", "a", "d", "e"],
+        }
+    )
+
+
+@pytest.fixture
+def tbl_pl_distinct():
+    return pl.DataFrame(
+        {
+            "col_1": ["a", "b", "c", "d"],
+            "col_2": ["a", "a", "c", "d"],
+            "col_3": ["a", "a", "d", "e"],
+        }
+    )
+
+
 COLUMN_LIST = ["x", "y", "z", "pb_is_good_"]
+
+COLUMN_LIST_DISTINCT = ["col_1", "col_2", "col_3", "pb_is_good_"]
 
 
 @pytest.mark.parametrize(
@@ -229,3 +254,27 @@ def test_column_exists_has_type(request, tbl_fixture, assertion_method):
 
     assert isinstance(col_exists_has_type.test_unit_res, int)
     assert col_exists_has_type.test_unit_res == 1
+
+
+@pytest.mark.parametrize("tbl_fixture", ["tbl_pd_distinct", "tbl_pl_distinct"])
+def test_rows_distinct(request, tbl_fixture):
+
+    tbl = request.getfixturevalue(tbl_fixture)
+
+    rows_distinct = RowsDistinct(
+        data_tbl=tbl,
+        columns_subset=["col_1", "col_2", "col_3"],
+        threshold=1,
+    )
+
+    assert isinstance(
+        rows_distinct.test_unit_res,
+        pd.DataFrame if tbl_fixture == "tbl_pd_distinct" else pl.DataFrame,
+    )
+
+    if tbl_fixture == "tbl_pd_distinct":
+        assert rows_distinct.test_unit_res.columns.tolist() == COLUMN_LIST_DISTINCT
+        assert rows_distinct.get_test_results().columns.tolist() == COLUMN_LIST_DISTINCT
+    else:
+        assert rows_distinct.test_unit_res.columns == COLUMN_LIST_DISTINCT
+        assert rows_distinct.get_test_results().columns == COLUMN_LIST_DISTINCT

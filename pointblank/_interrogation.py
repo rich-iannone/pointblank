@@ -7,7 +7,7 @@ import narwhals as nw
 from narwhals.typing import FrameT
 from narwhals.dependencies import is_pandas_dataframe, is_polars_dataframe
 
-from pointblank._utils import _column_test_prep, _convert_to_narwhals
+from pointblank._utils import _column_test_prep, _column_subset_test_prep, _convert_to_narwhals
 from pointblank.thresholds import _threshold_check
 from pointblank._constants import IBIS_BACKENDS
 from pointblank.column import Column
@@ -23,7 +23,9 @@ class Interrogator:
     x
         The values to compare.
     column
-        The column to check when passing a Narwhals DataFrame.
+        The column to check.
+    columns_subset
+        The subset of columns to use for the check.
     compare
         The value to compare against. Used in the following interrogations:
         - 'gt' for greater than
@@ -67,6 +69,7 @@ class Interrogator:
 
     x: nw.DataFrame | Any
     column: str = None
+    columns_subset: list[str] = None
     compare: float | int | list[float | int] = None
     set: list[float | int] = None
     pattern: str = None
@@ -1034,6 +1037,50 @@ class Interrogator:
             pb_is_good_=~nw.col(self.column).is_null(),
         ).to_native()
 
+    def rows_distinct(self) -> FrameT | Any:
+
+        # Ibis backends ---------------------------------------------
+
+        if self.tbl_type in IBIS_BACKENDS:
+
+            import ibis
+
+            tbl = self.x
+
+            # Get the column subset to use for the test
+            if self.columns_subset is None:
+                columns_subset = tbl.columns
+            else:
+                columns_subset = self.columns_subset
+
+            # Create a subset of the table with only the columns of interest and count the
+            # number of times each unique row (or portion thereof) appears
+            tbl = tbl.group_by(columns_subset).mutate(pb_count_=ibis._.count())
+
+            # Passing rows will have the value `1` (no duplicates, so True), otherwise False applies
+            return tbl.mutate(pb_is_good_=tbl["pb_count_"] == 1).drop("pb_count_")
+
+        # Local backends (Narwhals) ---------------------------------
+
+        tbl = self.x
+
+        # Get the column subset to use for the test
+        if self.columns_subset is None:
+            columns_subset = tbl.columns
+        else:
+            columns_subset = self.columns_subset
+
+        # Create a subset of the table with only the columns of interest
+        subset_tbl = tbl.select(columns_subset)
+
+        # Check for duplicates in the subset table, creating a series of booleans
+        pb_is_good_series = subset_tbl.is_duplicated()
+
+        # Add the series to the input table
+        tbl = tbl.with_columns(pb_is_good_=~pb_is_good_series)
+
+        return tbl.to_native()
+
 
 @dataclass
 class ColValsCompareOne:
@@ -1503,6 +1550,71 @@ class ColExistsHasType:
 
     def get_test_results(self):
         return self.test_unit_res
+
+
+@dataclass
+class RowsDistinct:
+    """
+    Check if rows in a DataFrame are distinct.
+
+    Parameters
+    ----------
+    data_tbl
+        A data table.
+    columns_subset
+        A list of columns to check for distinctness.
+    threshold
+        The maximum number of failing test units to allow.
+    tbl_type
+        The type of table to use for the assertion.
+
+    Returns
+    -------
+    bool
+        `True` when test units pass below the threshold level for failing test units, `False`
+        otherwise.
+    """
+
+    data_tbl: FrameT
+    columns_subset: list[str] | None
+    threshold: int
+    tbl_type: str = "local"
+
+    def __post_init__(self):
+
+        if self.tbl_type == "local":
+
+            # Convert the DataFrame to a format that narwhals can work with, and:
+            #  - check if the `column=` exists
+            #  - check if the `column=` type is compatible with the test
+            tbl = _column_subset_test_prep(df=self.data_tbl, columns_subset=self.columns_subset)
+
+        # TODO: For Ibis backends, check if the column exists and if the column type is compatible;
+        #       for now, just pass the table as is
+        if self.tbl_type in IBIS_BACKENDS:
+            tbl = self.data_tbl
+
+        # Collect results for the test units; the results are a list of booleans where
+        # `True` indicates a passing test unit
+        self.test_unit_res = Interrogator(
+            x=tbl,
+            columns_subset=self.columns_subset,
+            tbl_type=self.tbl_type,
+        ).rows_distinct()
+
+    def get_test_results(self):
+        return self.test_unit_res
+
+    def test(self):
+        # Get the number of failing test units by counting instances of `False` in the `pb_is_good_`
+        # column and then determine if the test passes overall by comparing the number of failing
+        # test units to the threshold for failing test units
+
+        results_list = nw.from_native(self.test_unit_res)["pb_is_good_"].to_list()
+
+        return _threshold_check(
+            failing_test_units=results_list.count(False), threshold=self.threshold
+        )
 
 
 @dataclass

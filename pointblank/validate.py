@@ -36,6 +36,7 @@ from pointblank._interrogation import (
     ColValsRegex,
     ColExistsHasType,
     NumberOfTestUnits,
+    RowsDistinct,
 )
 from pointblank.thresholds import (
     Thresholds,
@@ -2445,6 +2446,134 @@ class Validate:
 
         return self
 
+    def rows_distinct(
+        self,
+        columns_subset: str | list[str] | None = None,
+        pre: Callable | None = None,
+        thresholds: int | float | bool | tuple | dict | Thresholds = None,
+        active: bool = True,
+    ) -> Validate:
+        """
+        Validate whether rows in the table are distinct.
+
+        The `rows_distinct()` method checks whether rows in the table are distinct. This validation
+        will operate over the number of test units that is equal to the number of rows in the table
+        (determined after any `pre=` mutation has been applied).
+
+        Parameters
+        ----------
+        columns_subset
+            A single column or a list of columns to use as a subset for the distinct comparison.
+            If `None`, then all columns in the table will be used for the comparison. If multiple
+            columns are supplied, the distinct comparison will be made over the combination of
+            values in those columns.
+        pre
+            A pre-processing function or lambda to apply to the data table for the validation step.
+        thresholds
+            Failure threshold levels so that the validation step can react accordingly when
+            exceeding the set levels for different states (`warn`, `stop`, and `notify`). This can
+            be created simply as an integer or float denoting the absolute number or fraction of
+            failing test units for the 'warn' level. Otherwise, you can use a tuple of 1-3 values,
+            a dictionary of 1-3 entries, or a Thresholds object.
+        active
+            A boolean value indicating whether the validation step should be active. Using `False`
+            will make the validation step inactive (still reporting its presence and keeping indexes
+            for the steps unchanged).
+
+        Returns
+        -------
+        Validate
+            The `Validate` object with the added validation step.
+
+        Examples
+        --------
+        ```{python}
+        #| echo: false
+        #| output: false
+        import pointblank as pb
+        pb.config(report_incl_header=False, report_incl_footer=False)
+        ```
+        For the examples here, we'll use a simple Polars DataFrame with three string columns
+        (`col_1`, `col_2`, and `col_3`). The table is shown below:
+
+        ```{python}
+        import polars as pl
+
+        tbl = pl.DataFrame(
+            {
+                "col_1": ["a", "b", "c", "d"],
+                "col_2": ["a", "a", "c", "d"],
+                "col_3": ["a", "a", "d", "e"],
+            }
+        )
+
+        tbl
+        ```
+
+        Let's validate that the rows in the table are distinct with `rows_distinct()`. We'll
+        determine if this validation had any failing test units (there are four test units, one for
+        each row). A failing test units means that a given row is not distinct from any another row.
+
+        ```{python}
+        import pointblank as pb
+
+        validation = (
+            pb.Validate(data=tbl)
+            .rows_distinct()
+            .interrogate()
+        )
+
+        validation
+        ```
+
+        From this validation table we see that there are no failing test units. All rows in the
+        table are distinct from one another.
+
+        We can also use a subset of columns to determine distinctness. Let's specify the subset
+        using columns `col_2` and `col_3` for the next validation.
+
+        ```{python}
+        validation = (
+            pb.Validate(data=tbl)
+            .rows_distinct(columns_subset=["col_2", "col_3"])
+            .interrogate()
+        )
+
+        validation
+        ```
+
+        The validation table reports two failing test units. The first and second rows are
+        duplicated when considering only the values in columns `col_2` and `col_3`. There's only
+        one set of duplicates but there are two failing test units since each row is compared to all
+        others.
+        """
+
+        assertion_type = _get_fn_name()
+
+        _check_pre(pre=pre)
+        _check_thresholds(thresholds=thresholds)
+        _check_boolean_input(param=active, param_name="active")
+
+        # Determine threshold to use (global or local) and normalize a local `thresholds=` value
+        thresholds = (
+            self.thresholds if thresholds is None else _normalize_thresholds_creation(thresholds)
+        )
+
+        if columns_subset is not None and isinstance(columns_subset, str):
+            columns_subset = [columns_subset]
+
+        val_info = _ValidationInfo(
+            assertion_type=assertion_type,
+            column=columns_subset,
+            pre=pre,
+            thresholds=thresholds,
+            active=active,
+        )
+
+        self._add_validation(validation_info=val_info)
+
+        return self
+
     def interrogate(
         self,
         collect_extracts: bool = True,
@@ -2710,6 +2839,15 @@ class Validate:
                 validation.n_failed = 1 - result_bool
 
                 results_tbl = None
+
+            if assertion_category == "ROWS_DISTINCT":
+
+                results_tbl = RowsDistinct(
+                    data_tbl=data_tbl_step,
+                    columns_subset=column,
+                    threshold=threshold,
+                    tbl_type=tbl_type,
+                ).get_test_results()
 
             if assertion_category != "COL_EXISTS_HAS_TYPE":
 

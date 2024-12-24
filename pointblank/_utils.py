@@ -196,6 +196,22 @@ def _column_test_prep(
     return dfn
 
 
+def _column_subset_test_prep(
+    df: FrameT, columns_subset: list[str] | None, check_exists: bool = True
+) -> nw.DataFrame:
+
+    # Convert the DataFrame to a format that narwhals can work with.
+    dfn = _convert_to_narwhals(df=df)
+
+    # Check whether all columns exist
+    if check_exists and columns_subset:
+
+        for column in columns_subset:
+            _check_column_exists(dfn=dfn, column=column)
+
+    return dfn
+
+
 def _get_fn_name() -> str:
 
     # Get the current function name

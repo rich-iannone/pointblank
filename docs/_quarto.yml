@@ -69,6 +69,7 @@ quartodoc:
         - name: Validate.col_vals_not_null
         - name: Validate.col_vals_regex
         - name: Validate.col_exists
+        - name: Validate.rows_distinct
         - name: col
     - title: Interrogation and Reporting
       desc: >
