@@ -244,6 +244,665 @@ def load_dataset(
     return dataset
 
 
+def preview(
+    data: FrameT | Any,
+    columns_subset: str | list[str] | Column | None = None,
+    n_head: int = 5,
+    n_tail: int = 5,
+    limit: int | None = 50,
+    show_row_numbers: bool = True,
+    max_col_width: int | None = 250,
+    incl_header: bool = None,
+) -> GT:
+    """
+    Display a table preview that shows some rows from the top, some from the bottom.
+
+    To get a quick look at the data in a table, we can use the `preview()` function to display a
+    preview of the table. The function shows a subset of the rows from the start and end of the
+    table, with the number of rows from the start and end determined by the `n_head=` and `n_tail=`
+    parameters (set to `5` by default). This function works with any table that is supported by the
+    `pointblank` library, including Pandas, Polars, and Ibis backend tables (e.g., DuckDB, MySQL,
+    PostgreSQL, SQLite, Parquet, etc.).
+
+    The view is optimized for readability, with column names and data types displayed in a compact
+    format. The column widths are sized to fit the column names, dtypes, and column content up to
+    a configurable maximum width of `max_col_width=` pixels. The table can be scrolled horizontally
+    to view even very large datasets. Since the output is a Great Tables (`GT`) object, it can be
+    further customized using the `great_tables` API.
+
+    Parameters
+    ----------
+    data
+        The table to preview, which could be a DataFrame object or an Ibis table object. Read the
+        *Supported Input Table Types* section for details on the supported table types.
+    columns_subset
+        The columns to display in the table, by default `None` (all columns are shown). This can
+        be a string, a list of strings, a `Column` object, or a `ColumnSelector` object. The latter
+        two options allow for more flexible column selection using column selector functions. Errors
+        are raised if the column names provided don't match any columns in the table (when provided
+        as a string or list of strings) or if column selector expressions don't resolve to any
+        columns.
+    n_head
+        The number of rows to show from the start of the table. Set to `5` by default.
+    n_tail
+        The number of rows to show from the end of the table. Set to `5` by default.
+    limit
+        The limit value for the sum of `n_head=` and `n_tail=` (the total number of rows shown).
+        If the sum of `n_head=` and `n_tail=` exceeds the limit, an error is raised.
+    show_row_numbers
+        Should row numbers be shown? The numbers shown reflect the row numbers of the head and tail
+        in the full table.
+    max_col_width
+        The maximum width of the columns in pixels. This is `250` (`"250px"`) by default.
+    incl_header
+        Should the table include a header with the table type and table dimensions? Set to `True` by
+        default.
+
+    Returns
+    -------
+    GT
+        A GT object that displays the preview of the table.
+
+    Supported Input Table Types
+    ---------------------------
+    The `data=` parameter can be given any of the following table types:
+
+    - Polars DataFrame (`"polars"`)
+    - Pandas DataFrame (`"pandas"`)
+    - DuckDB table (`"duckdb"`)*
+    - MySQL table (`"mysql"`)*
+    - PostgreSQL table (`"postgresql"`)*
+    - SQLite table (`"sqlite"`)*
+    - Parquet table (`"parquet"`)*
+
+    The table types marked with an asterisk need to be prepared as Ibis tables (with type of
+    `ibis.expr.types.relations.Table`). Furthermore, using `preview()` with these types of tables
+    requires the Ibis library (`v9.5.0` or above) to be installed. If the input table is a Polars or
+    Pandas DataFrame, the availability of Ibis is not needed.
+
+    Examples
+    --------
+    It's easy to preview a table using the `preview()` function. Here's an example using the
+    `small_table` dataset (itself loaded using the `load_dataset()` function):
+
+    ```{python}
+    import pointblank as pb
+
+    small_table_polars = pb.load_dataset("small_table")
+
+    pb.preview(small_table_polars)
+    ```
+
+    This table is a Polars DataFrame, but the `preview()` function works with any table supported
+    by `pointblank`, including Pandas DataFrames and Ibis backend tables. Here's an example using
+    a DuckDB table handled by Ibis:
+
+    ```{python}
+    small_table_duckdb = pb.load_dataset("small_table", tbl_type="duckdb")
+
+    pb.preview(small_table_duckdb)
+    ```
+
+    The blue dividing line marks the end of the first `n_head=` rows and the start of the last
+    `n_tail=` rows.
+
+    We can adjust the number of rows shown from the start and end of the table by setting the
+    `n_head=` and `n_tail=` parameters. Let's enlarge each of these to `10`:
+
+    ```{python}
+    pb.preview(small_table_polars, n_head=10, n_tail=10)
+    ```
+
+    In the above case, the entire dataset is shown since the sum of `n_head=` and `n_tail=` is
+    greater than the number of rows in the table (which is 13).
+
+    The `columns_subset=` parameter can be used to show only specific columns in the table. You can
+    provide a list of column names to make the selection. Let's try that with the `"game_revenue"`
+    dataset as a Pandas DataFrame:
+
+    ```{python}
+    game_revenue_pandas = pb.load_dataset("game_revenue", tbl_type="pandas")
+
+    pb.preview(game_revenue_pandas, columns_subset=["player_id", "item_name", "item_revenue"])
+    ```
+
+    Alternatively, we can use column selector functions like `starts_with()` and `matches()` to
+    select columns based on text or patterns:
+
+    ```{python}
+    pb.preview(game_revenue_pandas, n_head=2, n_tail=2, columns_subset=pb.starts_with("session"))
+    ```
+
+    Multiple column selector functions can be combined within `col()` using operators like `|` and
+    `&`:
+
+    ```{python}
+    pb.preview(
+      game_revenue_pandas,
+      n_head=2,
+      n_tail=2,
+      columns_subset=pb.col(pb.starts_with("item") | pb.matches("player"))
+    )
+    ```
+    """
+
+    if incl_header is None:
+        incl_header = global_config.preview_incl_header
+
+    # Make a copy of the data to avoid modifying the original
+    data = copy.deepcopy(data)
+
+    # Check that the n_head and n_tail aren't greater than the limit
+    if n_head + n_tail > limit:
+        raise ValueError(f"The sum of `n_head=` and `n_tail=` cannot exceed the limit ({limit}).")
+
+    # Do we have a DataFrame library to work with? We need at least one to display
+    # the table using Great Tables
+    _check_any_df_lib(method_used="preview_tbl")
+
+    # Set flag for whether the full dataset is shown, or just the head and tail; if the table
+    # is very small, the value likely will be `True`
+    full_dataset = False
+
+    # Determine if the table is a DataFrame or an Ibis table
+    tbl_type = _get_tbl_type(data=data)
+    ibis_tbl = "ibis.expr.types.relations.Table" in str(type(data))
+    pl_pb_tbl = "polars" in tbl_type or "pandas" in tbl_type
+
+    # Select the DataFrame library to use for displaying the Ibis table
+    df_lib_gt = _select_df_lib(preference="polars")
+    df_lib_name_gt = df_lib_gt.__name__
+
+    # If the table is a DataFrame (Pandas or Polars), set `df_lib_name_gt` to the name of the
+    # library (e.g., "polars" or "pandas")
+    if pl_pb_tbl:
+        df_lib_name_gt = "polars" if "polars" in tbl_type else "pandas"
+
+        # Handle imports of Polars or Pandas here
+        if df_lib_name_gt == "polars":
+            import polars as pl
+        else:
+            import pandas as pd
+
+    # If `columns_subset=` is not None, resolve the columns to display
+    if columns_subset is not None:
+
+        col_names = _get_column_names(data, ibis_tbl=ibis_tbl, df_lib_name_gt=df_lib_name_gt)
+
+        resolved_columns = _validate_columns_subset(
+            columns_subset=columns_subset, col_names=col_names
+        )
+
+        if len(resolved_columns) == 0:
+            raise ValueError(
+                "The `columns_subset=` value doesn't resolve to any columns in the table."
+            )
+
+        # Select the columns to display in the table with the `resolved_columns` value
+        data = _select_columns(
+            data, resolved_columns=resolved_columns, ibis_tbl=ibis_tbl, tbl_type=tbl_type
+        )
+
+    # From an Ibis table:
+    # - get the row count
+    # - subset the table to get the first and last n rows (if small, don't filter the table)
+    # - get the row numbers for the table
+    # - convert the table to a Polars or Pandas DF
+    if ibis_tbl:
+
+        # Get the Schema of the table
+        tbl_schema = Schema(tbl=data)
+
+        # Get the row count for the table
+        ibis_rows = data.count()
+        n_rows = ibis_rows.to_polars() if df_lib_name_gt == "polars" else int(ibis_rows.to_pandas())
+
+        # If n_head + n_tail is greater than the row count, display the entire table
+        if n_head + n_tail > n_rows:
+            full_dataset = True
+            data_subset = data
+            row_number_list = range(1, n_rows + 1)
+        else:
+            # Get the first and last n rows of the table
+            data_head = data.head(n=n_head)
+            row_numbers_head = range(1, n_head + 1)
+            data_tail = data[(n_rows - n_tail) : n_rows]
+            row_numbers_tail = range(n_rows - n_tail + 1, n_rows + 1)
+            data_subset = data_head.union(data_tail)
+            row_number_list = list(row_numbers_head) + list(row_numbers_tail)
+
+        # Convert either to Polars or Pandas depending on the available library
+        if df_lib_name_gt == "polars":
+            data = data_subset.to_polars()
+        else:
+            data = data_subset.to_pandas()
+
+    # From a DataFrame:
+    # - get the row count
+    # - subset the table to get the first and last n rows (if small, don't filter the table)
+    # - get the row numbers for the table
+    if pl_pb_tbl:
+
+        # Get the Schema of the table
+        tbl_schema = Schema(tbl=data)
+
+        if tbl_type == "polars":
+
+            n_rows = int(data.height)
+
+            # If n_head + n_tail is greater than the row count, display the entire table
+            if n_head + n_tail >= n_rows:
+                full_dataset = True
+                row_number_list = range(1, n_rows + 1)
+            else:
+                data = pl.concat([data.head(n=n_head), data.tail(n=n_tail)])
+
+                row_number_list = list(range(1, n_head + 1)) + list(
+                    range(n_rows - n_tail + 1, n_rows + 1)
+                )
+
+        if tbl_type == "pandas":
+
+            n_rows = data.shape[0]
+
+            # If n_head + n_tail is greater than the row count, display the entire table
+            if n_head + n_tail >= n_rows:
+                full_dataset = True
+                data_subset = data
+
+                row_number_list = range(1, n_rows + 1)
+            else:
+                data = pd.concat([data.head(n=n_head), data.tail(n=n_tail)])
+
+                row_number_list = list(range(1, n_head + 1)) + list(
+                    range(n_rows - n_tail + 1, n_rows + 1)
+                )
+
+    # From the table schema, get a list of tuples containing column names and data types
+    col_dtype_dict = tbl_schema.columns
+
+    # Extract the column names from the list of tuples (first element of each tuple)
+    col_names = [col[0] for col in col_dtype_dict]
+
+    # Iterate over the list of tuples and create a new dictionary with the
+    # column names and data types
+    col_dtype_dict = {k: v for k, v in col_dtype_dict}
+
+    # Create short versions of the data types by omitting any text in parentheses
+    col_dtype_dict_short = {
+        k: v.split("(")[0] if "(" in v else v for k, v in col_dtype_dict.items()
+    }
+
+    # Create a dictionary of column and row positions where the value is None/NA/NULL
+    # This is used to highlight these values in the table
+    if df_lib_name_gt == "polars":
+        none_values = {k: data[k].is_null().to_list() for k in col_names}
+    else:
+        none_values = {k: data[k].isnull() for k in col_names}
+
+    none_values = [(k, i) for k, v in none_values.items() for i, val in enumerate(v) if val]
+
+    # Import Great Tables to get preliminary renders of the columns
+    import great_tables as gt
+
+    # For each of the columns get the average number of characters printed for each of the values
+    max_length_col_vals = []
+
+    for column in col_dtype_dict.keys():
+
+        # Select a single column of values
+        data_col = data[[column]] if df_lib_name_gt == "pandas" else data.select([column])
+
+        # Using Great Tables, render the columns and get the list of values as formatted strings
+        built_gt = GT(data=data_col).fmt_markdown(columns=column)._build_data(context="html")
+        column_values = gt.gt._get_column_of_values(built_gt, column_name=column, context="html")
+
+        # Get the maximum number of characters in the column
+        max_length_col_vals.append(max([len(str(val)) for val in column_values]))
+
+    length_col_names = [len(column) for column in col_dtype_dict.keys()]
+    length_data_types = [len(dtype) for dtype in col_dtype_dict_short.values()]
+
+    # Comparing the length of the column names, the data types, and the max length of the
+    # column values, prefer the largest of these for the column widths (by column)
+    col_widths = [
+        f"{round(min(max(7.8 * max_length_col_vals[i] + 10, 7.8 * length_col_names[i] + 10, 7.8 * length_data_types[i] + 10), max_col_width))}px"
+        for i in range(len(col_dtype_dict.keys()))
+    ]
+
+    # Set the column width to the col_widths list
+    col_width_dict = {k: v for k, v in zip(col_names, col_widths)}
+
+    # For each of the values in the dictionary, prepend the column name to the data type
+    col_dtype_labels_dict = {
+        k: html(
+            f"<div><div style='white-space: nowrap; text-overflow: ellipsis; overflow: hidden; "
+            f"padding-bottom: 2px; margin-bottom: 2px;'>{k}</div><div style='white-space: nowrap; "
+            f"text-overflow: ellipsis; overflow: hidden; padding-top: 2px; margin-top: 2px;'>"
+            f"<em>{v}</em></div></div>"
+        )
+        for k, v in col_dtype_dict_short.items()
+    }
+
+    # Prepend a column that contains the row numbers if `show_row_numbers=True`
+    if show_row_numbers:
+
+        if df_lib_name_gt == "polars":
+
+            import polars as pl
+
+            row_number_series = pl.Series("_row_num_", row_number_list)
+            data = data.insert_column(0, row_number_series)
+
+        if df_lib_name_gt == "pandas":
+
+            data.insert(0, "_row_num_", row_number_list)
+
+        # Get the highest number in the `row_number_list` and calculate a width that will
+        # safely fit a number of that magnitude
+        max_row_num = max(row_number_list)
+        max_row_num_width = len(str(max_row_num)) * 7.8 + 10
+
+        # Update the col_width_dict to include the row number column
+        col_width_dict = {"_row_num_": f"{max_row_num_width}px"} | col_width_dict
+        # Update the col_dtype_labels_dict to include the row number column (use empty string)
+        col_dtype_labels_dict = {"_row_num_": ""} | col_dtype_labels_dict
+
+        # Create the label, table type, and thresholds HTML fragments
+        table_type_html = _create_table_type_html(
+            tbl_type=tbl_type, tbl_name=None, font_size="10px"
+        )
+
+        tbl_dims_html = _create_table_dims_html(
+            columns=len(col_names), rows=n_rows, font_size="10px"
+        )
+
+        # Compose the subtitle HTML fragment
+        combined_subtitle = (
+            "<div>"
+            '<div style="padding-top: 0; padding-bottom: 7px;">'
+            f"{table_type_html}"
+            f"{tbl_dims_html}"
+            "</div>"
+            "</div>"
+        )
+
+    gt_tbl = (
+        GT(data=data, id="pb_preview_tbl")
+        .opt_table_font(font=google_font(name="IBM Plex Sans"))
+        .opt_align_table_header(align="left")
+        .fmt_markdown(columns=col_names)
+        .tab_style(
+            style=style.css(
+                "height: 14px; padding: 4px; white-space: nowrap; text-overflow: "
+                "ellipsis; overflow: hidden;"
+            ),
+            locations=loc.body(),
+        )
+        .tab_style(
+            style=style.text(color="black", font=google_font(name="IBM Plex Mono"), size="12px"),
+            locations=loc.body(),
+        )
+        .tab_style(
+            style=style.text(color="gray20", font=google_font(name="IBM Plex Mono"), size="12px"),
+            locations=loc.column_labels(),
+        )
+        .tab_style(
+            style=style.borders(
+                sides=["top", "bottom"], color="#E9E9E", style="solid", weight="1px"
+            ),
+            locations=loc.body(),
+        )
+        .tab_options(
+            table_body_vlines_style="solid",
+            table_body_vlines_width="1px",
+            table_body_vlines_color="#E9E9E9",
+            column_labels_vlines_style="solid",
+            column_labels_vlines_width="1px",
+            column_labels_vlines_color="#F2F2F2",
+        )
+        .cols_label(cases=col_dtype_labels_dict)
+        .cols_width(cases=col_width_dict)
+    )
+
+    if incl_header:
+        gt_tbl = gt_tbl.tab_header(title=html(combined_subtitle))
+        gt_tbl = gt_tbl.tab_options(heading_subtitle_font_size="12px")
+
+    if none_values:
+        for column, none_index in none_values:
+            gt_tbl = gt_tbl.tab_style(
+                style=[style.text(color="#B22222"), style.fill(color="#FFC1C159")],
+                locations=loc.body(rows=none_index, columns=column),
+            )
+
+        if tbl_type == "pandas":
+            gt_tbl = gt_tbl.sub_missing(missing_text="NA")
+
+        if ibis_tbl:
+            gt_tbl = gt_tbl.sub_missing(missing_text="NULL")
+
+    if not full_dataset:
+
+        gt_tbl = gt_tbl.tab_style(
+            style=style.borders(sides="bottom", color="#6699CC80", style="solid", weight="2px"),
+            locations=loc.body(rows=n_head - 1),
+        )
+
+    if show_row_numbers:
+
+        gt_tbl = gt_tbl.tab_style(
+            style=[
+                style.text(color="gray", font=google_font(name="IBM Plex Mono"), size="10px"),
+                style.borders(sides="right", color="#6699CC80", style="solid", weight="2px"),
+            ],
+            locations=loc.body(columns="_row_num_"),
+        )
+
+    return gt_tbl
+
+
+def _get_column_names(data: FrameT | Any, ibis_tbl: bool, df_lib_name_gt: str) -> list[str]:
+    if ibis_tbl:
+        return data.columns if df_lib_name_gt == "polars" else list(data.columns)
+    return list(data.columns)
+
+
+def _validate_columns_subset(
+    columns_subset: str | list[str] | Column, col_names: list[str]
+) -> list[str]:
+    if isinstance(columns_subset, str):
+        if columns_subset not in col_names:
+            raise ValueError("The `columns_subset=` value doesn't match any columns in the table.")
+        return [columns_subset]
+
+    if isinstance(columns_subset, list):
+        if all(isinstance(col, str) for col in columns_subset):
+            if not all(col in col_names for col in columns_subset):
+                raise ValueError(
+                    "Not all columns provided as `columns_subset=` match the table's columns."
+                )
+            return columns_subset
+
+    return columns_subset.resolve(columns=col_names)
+
+
+def _select_columns(
+    data: FrameT | Any, resolved_columns: list[str], ibis_tbl: bool, tbl_type: str
+) -> FrameT | Any:
+    if ibis_tbl:
+        return data[resolved_columns]
+    if tbl_type == "polars":
+        return data.select(resolved_columns)
+    return data[resolved_columns]
+
+
+def get_column_count(data: FrameT | Any) -> int:
+    """
+    Get the number of columns in a table.
+
+    The `get_column_count()` function returns the number of columns in a table. The function works
+    with any table that is supported by the `pointblank` library, including Pandas, Polars, and Ibis
+    backend tables (e.g., DuckDB, MySQL, PostgreSQL, SQLite, Parquet, etc.).
+
+    Parameters
+    ----------
+    data
+        The table for which to get the column count, which could be a DataFrame object or an Ibis
+        table object. Read the *Supported Input Table Types* section for details on the supported
+        table types.
+
+    Returns
+    -------
+    int
+        The number of columns in the table.
+
+    Supported Input Table Types
+    ---------------------------
+    The `data=` parameter can be given any of the following table types:
+
+    - Polars DataFrame (`"polars"`)
+    - Pandas DataFrame (`"pandas"`)
+    - DuckDB table (`"duckdb"`)*
+    - MySQL table (`"mysql"`)*
+    - PostgreSQL table (`"postgresql"`)*
+    - SQLite table (`"sqlite"`)*
+    - Parquet table (`"parquet"`)*
+
+    The table types marked with an asterisk need to be prepared as Ibis tables (with type of
+    `ibis.expr.types.relations.Table`). Furthermore, using `get_column_count()` with these types of
+    tables requires the Ibis library (`v9.5.0` or above) to be installed. If the input table is a
+    Polars or Pandas DataFrame, the availability of Ibis is not needed.
+
+    Examples
+    --------
+    To get the number of columns in a table, we can use the `get_column_count()` function. Here's an
+    example using the `small_table` dataset (itself loaded using the `load_dataset()` function):
+
+    ```{python}
+    import pointblank as pb
+
+    small_table_polars = pb.load_dataset("small_table")
+
+    pb.get_column_count(small_table_polars)
+    ```
+
+    This table is a Polars DataFrame, but the `get_column_count()` function works with any table
+    supported by `pointblank`, including Pandas DataFrames and Ibis backend tables. Here's an
+    example using a DuckDB table handled by Ibis:
+
+    ```{python}
+    small_table_duckdb = pb.load_dataset("small_table", tbl_type="duckdb")
+
+    pb.get_column_count(small_table_duckdb)
+    ```
+
+    The function always returns the number of columns in the table as an integer value, which is
+    `8` for the `small_table` dataset.
+    """
+
+    if "ibis.expr.types.relations.Table" in str(type(data)):
+        return len(data.columns)
+
+    elif "polars" in str(type(data)):
+        return len(data.columns)
+
+    elif "pandas" in str(type(data)):
+        return data.shape[1]
+
+    else:
+        raise ValueError("The input table type supplied in `data=` is not supported.")
+
+
+def get_row_count(data: FrameT | Any) -> int:
+    """
+    Get the number of rows in a table.
+
+    The `get_row_count()` function returns the number of rows in a table. The function works with
+    any table that is supported by the `pointblank` library, including Pandas, Polars, and Ibis
+    backend tables (e.g., DuckDB, MySQL, PostgreSQL, SQLite, Parquet, etc.).
+
+    Parameters
+    ----------
+    data
+        The table for which to get the row count, which could be a DataFrame object or an Ibis table
+        object. Read the *Supported Input Table Types* section for details on the supported table
+        types.
+
+    Returns
+    -------
+    int
+        The number of rows in the table.
+
+    Supported Input Table Types
+    ---------------------------
+    The `data=` parameter can be given any of the following table types:
+
+    - Polars DataFrame (`"polars"`)
+    - Pandas DataFrame (`"pandas"`)
+    - DuckDB table (`"duckdb"`)*
+    - MySQL table (`"mysql"`)*
+    - PostgreSQL table (`"postgresql"`)*
+    - SQLite table (`"sqlite"`)*
+    - Parquet table (`"parquet"`)*
+
+    The table types marked with an asterisk need to be prepared as Ibis tables (with type of
+    `ibis.expr.types.relations.Table`). Furthermore, using `get_row_count()` with these types of
+    tables requires the Ibis library (`v9.5.0` or above) to be installed. If the input table is a
+    Polars or Pandas DataFrame, the availability of Ibis is not needed.
+
+    Examples
+    --------
+    Getting the number of rows in a table is easily done by using the `get_row_count()` function.
+    Here's an example using the `game_revenue` dataset (itself loaded using the `load_dataset()`
+    function):
+
+    ```{python}
+    import pointblank as pb
+
+    game_revenue_polars = pb.load_dataset("game_revenue")
+
+    pb.get_row_count(game_revenue_polars)
+    ```
+
+    This table is a Polars DataFrame, but the `get_row_count()` function works with any table
+    supported by `pointblank`, including Pandas DataFrames and Ibis backend tables. Here's an
+    example using a DuckDB table handled by Ibis:
+
+    ```{python}
+    game_revenue_duckdb = pb.load_dataset("game_revenue", tbl_type="duckdb")
+
+    pb.get_row_count(game_revenue_duckdb)
+    ```
+
+    The function always returns the number of rows in the table as an integer value, which is `2000`
+    for the `game_revenue` dataset.
+    """
+
+    if "ibis.expr.types.relations.Table" in str(type(data)):
+
+        # Determine whether Pandas or Polars is available to get the row count
+        _check_any_df_lib(method_used="get_row_count")
+
+        # Select the DataFrame library to use for displaying the Ibis table
+        df_lib = _select_df_lib(preference="polars")
+        df_lib_name = df_lib.__name__
+
+        if df_lib_name == "pandas":
+            return int(data.count().to_pandas())
+        else:
+            return int(data.count().to_polars())
+
+    elif "polars" in str(type(data)):
+        return int(data.height)
+
+    elif "pandas" in str(type(data)):
+        return data.shape[0]
+
+    else:
+        raise ValueError("The input table type supplied in `data=` is not supported.")
+
+
 @dataclass
 class _ValidationInfo:
     """
@@ -5604,6 +6263,200 @@ class Validate:
 
         return gt_tbl
 
+    def get_step_report(self, i: int) -> GT:
+        """
+        Get a detailed report for a single validation step.
+
+        The `get_step_report()` method returns a report of what went well, or what failed
+        spectacularly, for a given validation step. The report includes a summary of the validation
+        step and a detailed breakdown of the interrogation results. The report is presented as a GT
+        table object, which can be displayed in a notebook or exported to an HTML file.
+
+        :::{.callout-warning}
+        The `get_step_report()` is still experimental. Please report any issues you encounter at the
+        [Pointblank issue tracker](https://github.com/rich-iannone/pointblank/issues).
+        :::
+
+        Parameters
+        ----------
+        i
+            The step number for which to get a detailed report.
+
+        Returns
+        -------
+        GT
+            A GT table object that represents the detailed report for the validation step.
+
+        Examples
+        --------
+        ```{python}
+        #| echo: false
+        #| output: false
+        import pointblank as pb
+        pb.config(report_incl_header=False, report_incl_footer=False, preview_incl_header=False)
+        ```
+        Let's create a validation plan with a few validation steps and interrogate the data. With
+        that, we'll have a look at the validation reporting table for the entire collection of
+        steps and what went well or what failed.
+
+        ```{python}
+        import pointblank as pb
+
+        validation = (
+            pb.Validate(
+                data=pb.load_dataset(dataset="small_table", tbl_type="pandas"),
+                tbl_name="small_table",
+                label="Example for the get_step_report() method",
+                thresholds=(1, 0.20, 0.40)
+            )
+            .col_vals_lt(columns="d", value=3500)
+            .col_vals_between(columns="c", left=1, right=8)
+            .col_vals_gt(columns="a", value=3)
+            .col_vals_regex(columns="b", pattern=r"\d-[a-z]{3}-\d{3}")
+            .interrogate()
+        )
+
+        validation
+        ```
+
+        There were four validation steps performed, where the first three steps had failing test
+        units and the last step had no failures. Let's get a detailed report for the first step by
+        using the `get_step_report()` method.
+
+        ```{python}
+        validation.get_step_report(i=1)
+        ```
+
+        The report for the first step is displayed. The report includes a summary of the validation
+        step and a detailed breakdown of the interrogation results. The report provides details on
+        what the validation step was checking, the extent to which the test units failed, and a
+        table that shows the failing rows of the data with the column of interest highlighted.
+
+        The second and third steps also had failing test units. Reports for those steps can be
+        viewed by using `get_step_report(i=2)` and `get_step_report(i=3)` respectively.
+
+        The final step did not have any failing test units. A report for the final step can still be
+        viewed by using `get_step_report(i=4)`. The report will indicate that every test unit passed
+        and a prview of the target table will be provided.
+
+        ```{python}
+        validation.get_step_report(i=4)
+        ```
+        """
+
+        # If the step number is not valid, raise an error
+        if i <= 0:
+            raise ValueError("Step number must be an integer value greater than 0.")
+
+        # If the step number is not valid, raise an error
+        if i not in self._get_validation_dict(i=None, attr="i"):
+            raise ValueError(f"Step {i} does not exist in the validation plan.")
+
+        # Convert the `validation_info` object to a dictionary
+        validation_info_dict = _validation_info_as_dict(validation_info=self.validation_info)
+
+        # Filter the dictionary to include only the information for the selected step
+        validation_step = {
+            key: value[i - 1] for key, value in validation_info_dict.items() if key != "i"
+        }
+
+        # From `validation_step` pull out key values for the report
+        assertion_type = validation_step["assertion_type"]
+        column = validation_step["column"]
+        values = validation_step["values"]
+        inclusive = validation_step["inclusive"]
+        all_passed = validation_step["all_passed"]
+        n = validation_step["n"]
+        n_failed = validation_step["n_failed"]
+        active = validation_step["active"]
+
+        # Get the column position in the table
+        if column is not None:
+            if isinstance(column, str):
+                column_list = list(self.data.columns)
+                column_position = column_list.index(column) + 1
+            elif isinstance(column, list):
+                column_position = [list(self.data.columns).index(col) + 1 for col in column]
+            else:
+                column_position = None
+        else:
+            column_position = None
+
+        # TODO: Show a report with the validation plan but state that the step is inactive
+        # If the step is not active then return a message indicating that the step is inactive
+        if not active:
+            return "This validation step is inactive."
+
+        # Get the extracted data for the step
+        extract = self.get_data_extracts(i=i, frame=True)
+
+        # Create a table with a sample of ten rows, highlighting the column of interest
+        tbl_preview = preview(data=self.data, n_head=5, n_tail=5, limit=10, incl_header=False)
+
+        # If no rows were extracted, create a message to indicate that no rows were extracted
+        # if get_row_count(extract) == 0:
+        #    return "No rows were extracted."
+
+        if assertion_type in ROW_BASED_VALIDATION_TYPES:
+
+            step_report = _step_report_row_based(
+                assertion_type=assertion_type,
+                i=i,
+                column=column,
+                column_position=column_position,
+                values=values,
+                inclusive=inclusive,
+                n=n,
+                n_failed=n_failed,
+                all_passed=all_passed,
+                extract=extract,
+                tbl_preview=tbl_preview,
+            )
+
+        elif assertion_type == "col_schema_match":
+
+            # Get the parameters for column-schema matching
+            values_dict = validation_step["values"]
+
+            all_passed = validation_step["all_passed"]
+
+            schema = values_dict["schema"]
+            complete = values_dict["complete"]
+            in_order = values_dict["in_order"]
+            case_sensitive_colnames = values_dict["case_sensitive_colnames"]
+            case_sensitive_dtypes = values_dict["case_sensitive_dtypes"]
+            full_match_dtypes = values_dict["full_match_dtypes"]
+
+            # Get the target table's schema
+            schema_target = Schema(tbl=self.data)
+
+            # CASE I: The default case
+            if complete and in_order:
+
+                colnames_tgt = [x[0] for x in schema_target.columns]
+                dtypes_tgt = [str(x[1]) for x in schema_target.columns]
+
+                step_report = _step_report_schema_complete_in_order(
+                    step=i,
+                    schema=schema,
+                    schema_target=schema_target,
+                    colnames_tgt=colnames_tgt,
+                    dtypes_tgt=dtypes_tgt,
+                    all_passed=all_passed,
+                )
+
+            # CASE II: the case where `complete=True` and `in_order=False`
+            if complete and not in_order:
+
+                step_report = _step_report_schema_complete_any_order(
+                    step=i, schema=schema, schema_target=schema_target, all_passed=all_passed
+                )
+
+        else:
+            step_report = None
+
+        return step_report
+
     def _add_validation(self, validation_info):
         """
         Add a validation to the list of validations.
@@ -6153,660 +7006,802 @@ def _create_thresholds_html(thresholds: Thresholds) -> str:
     )
 
 
-def preview(
-    data: FrameT | Any,
-    columns_subset: str | list[str] | Column | None = None,
-    n_head: int = 5,
-    n_tail: int = 5,
-    limit: int | None = 50,
-    show_row_numbers: bool = True,
-    max_col_width: int | None = 250,
-    incl_header: bool = None,
-) -> GT:
-    """
-    Display a table preview that shows some rows from the top, some from the bottom.
+def _step_report_row_based(
+    assertion_type: str,
+    i: int,
+    column: str,
+    column_position: int,
+    values: any,
+    inclusive: tuple[bool, bool] | None,
+    n: int,
+    n_failed: int,
+    all_passed: bool,
+    extract: any,
+    tbl_preview: GT,
+):
 
-    To get a quick look at the data in a table, we can use the `preview()` function to display a
-    preview of the table. The function shows a subset of the rows from the start and end of the
-    table, with the number of rows from the start and end determined by the `n_head=` and `n_tail=`
-    parameters (set to `5` by default). This function works with any table that is supported by the
-    `pointblank` library, including Pandas, Polars, and Ibis backend tables (e.g., DuckDB, MySQL,
-    PostgreSQL, SQLite, Parquet, etc.).
+    # Get the length of the extracted data for the step
+    extract_length = get_row_count(extract)
 
-    The view is optimized for readability, with column names and data types displayed in a compact
-    format. The column widths are sized to fit the column names, dtypes, and column content up to
-    a configurable maximum width of `max_col_width=` pixels. The table can be scrolled horizontally
-    to view even very large datasets. Since the output is a Great Tables (`GT`) object, it can be
-    further customized using the `great_tables` API.
+    # Generate explantory text for the validation step
+    if assertion_type == "col_vals_gt":
+        text = f"<code style='color: #303030; font-family: monospace; font-size: smaller;'>{column} > {values}</code>"
+    elif assertion_type == "col_vals_lt":
+        text = f"<code style='color: #303030; font-family: monospace; font-size: smaller;'>{column} < {values}</code>"
+    elif assertion_type == "col_vals_eq":
+        text = f"<code style='color: #303030; font-family: monospace; font-size: smaller;'>{column} = {values}</code>"
+    elif assertion_type == "col_vals_ne":
+        text = f"<code style='color: #303030; font-family: monospace; font-size: smaller;'>{column} &ne; {values}</code>"
+    elif assertion_type == "col_vals_ge":
+        text = f"<code style='color: #303030; font-family: monospace; font-size: smaller;'>{column} &ge; {values}</code>"
+    elif assertion_type == "col_vals_le":
+        text = f"<code style='color: #303030; font-family: monospace; font-size: smaller;'>{column} &le; {values}</code>"
+    elif assertion_type == "col_vals_between":
+        symbol_left = "&le;" if inclusive[0] else "&lt;"
+        symbol_right = "&le;" if inclusive[1] else "&lt;"
+        text = f"<code style='color: #303030; font-family: monospace; font-size: smaller;'>{values[0]} {symbol_left} {column} {symbol_right} {values[1]}</code>"
+    elif assertion_type == "col_vals_outside":
+        symbol_left = "&lt;" if inclusive[0] else "&le;"
+        symbol_right = "&gt;" if inclusive[1] else "&ge;"
+        text = f"<code style='color: #303030; font-family: monospace; font-size: smaller;'>{column} {symbol_left} {values[0]}, {column} {symbol_right} {values[1]}</code>"
+    elif assertion_type == "col_vals_in_set":
+        elements = ", ".join(values)
+        text = f"<code style='color: #303030; font-family: monospace; font-size: smaller;'>{column} &isinv; {{{elements}}}</code>"
+    elif assertion_type == "col_vals_not_in_set":
+        elements = ", ".join(values)
+        text = f"<code style='color: #303030; font-family: monospace; font-size: smaller;'>{column} &NotElement; {{{elements}}}</code>"
+    elif assertion_type == "col_vals_regex":
+        text = f"<code style='color: #303030; font-family: monospace; font-size: smaller;'>{column}</code> matches regex <code style='color: #303030; font-family: monospace; font-size: smaller;'>{values}</code>"
+    elif assertion_type == "col_vals_null":
+        text = f"<code style='color: #303030; font-family: monospace; font-size: smaller;'>{column}</code> is <code style='color: #303030; font-family: monospace; font-size: smaller;'>Null</code>"
+    elif assertion_type == "col_vals_not_null":
+        text = f"<code style='color: #303030; font-family: monospace; font-size: smaller;'>{column}</code> is not <code style='color: #303030; font-family: monospace; font-size: smaller;'>Null</code>"
 
-    Parameters
-    ----------
-    data
-        The table to preview, which could be a DataFrame object or an Ibis table object. Read the
-        *Supported Input Table Types* section for details on the supported table types.
-    columns_subset
-        The columns to display in the table, by default `None` (all columns are shown). This can
-        be a string, a list of strings, a `Column` object, or a `ColumnSelector` object. The latter
-        two options allow for more flexible column selection using column selector functions. Errors
-        are raised if the column names provided don't match any columns in the table (when provided
-        as a string or list of strings) or if column selector expressions don't resolve to any
-        columns.
-    n_head
-        The number of rows to show from the start of the table. Set to `5` by default.
-    n_tail
-        The number of rows to show from the end of the table. Set to `5` by default.
-    limit
-        The limit value for the sum of `n_head=` and `n_tail=` (the total number of rows shown).
-        If the sum of `n_head=` and `n_tail=` exceeds the limit, an error is raised.
-    show_row_numbers
-        Should row numbers be shown? The numbers shown reflect the row numbers of the head and tail
-        in the full table.
-    max_col_width
-        The maximum width of the columns in pixels. This is `250` (`"250px"`) by default.
-    incl_header
-        Should the table include a header with the table type and table dimensions? Set to `True` by
-        default.
+    if all_passed:
 
-    Returns
-    -------
-    GT
-        A GT object that displays the preview of the table.
+        check_mark_html = "<span style='color: #4CA64C;'>&check;</span>"
 
-    Supported Input Table Types
-    ---------------------------
-    The `data=` parameter can be given any of the following table types:
-
-    - Polars DataFrame (`"polars"`)
-    - Pandas DataFrame (`"pandas"`)
-    - DuckDB table (`"duckdb"`)*
-    - MySQL table (`"mysql"`)*
-    - PostgreSQL table (`"postgresql"`)*
-    - SQLite table (`"sqlite"`)*
-    - Parquet table (`"parquet"`)*
-
-    The table types marked with an asterisk need to be prepared as Ibis tables (with type of
-    `ibis.expr.types.relations.Table`). Furthermore, using `preview()` with these types of tables
-    requires the Ibis library (`v9.5.0` or above) to be installed. If the input table is a Polars or
-    Pandas DataFrame, the availability of Ibis is not needed.
-
-    Examples
-    --------
-    It's easy to preview a table using the `preview()` function. Here's an example using the
-    `small_table` dataset (itself loaded using the `load_dataset()` function):
-
-    ```{python}
-    import pointblank as pb
-
-    small_table_polars = pb.load_dataset("small_table")
-
-    pb.preview(small_table_polars)
-    ```
-
-    This table is a Polars DataFrame, but the `preview()` function works with any table supported
-    by `pointblank`, including Pandas DataFrames and Ibis backend tables. Here's an example using
-    a DuckDB table handled by Ibis:
-
-    ```{python}
-    small_table_duckdb = pb.load_dataset("small_table", tbl_type="duckdb")
-
-    pb.preview(small_table_duckdb)
-    ```
-
-    The blue dividing line marks the end of the first `n_head=` rows and the start of the last
-    `n_tail=` rows.
-
-    We can adjust the number of rows shown from the start and end of the table by setting the
-    `n_head=` and `n_tail=` parameters. Let's enlarge each of these to `10`:
-
-    ```{python}
-    pb.preview(small_table_polars, n_head=10, n_tail=10)
-    ```
-
-    In the above case, the entire dataset is shown since the sum of `n_head=` and `n_tail=` is
-    greater than the number of rows in the table (which is 13).
-
-    The `columns_subset=` parameter can be used to show only specific columns in the table. You can
-    provide a list of column names to make the selection. Let's try that with the `"game_revenue"`
-    dataset as a Pandas DataFrame:
-
-    ```{python}
-    game_revenue_pandas = pb.load_dataset("game_revenue", tbl_type="pandas")
-
-    pb.preview(game_revenue_pandas, columns_subset=["player_id", "item_name", "item_revenue"])
-    ```
-
-    Alternatively, we can use column selector functions like `starts_with()` and `matches()` to
-    select columns based on text or patterns:
-
-    ```{python}
-    pb.preview(game_revenue_pandas, n_head=2, n_tail=2, columns_subset=pb.starts_with("session"))
-    ```
-
-    Multiple column selector functions can be combined within `col()` using operators like `|` and
-    `&`:
-
-    ```{python}
-    pb.preview(
-      game_revenue_pandas,
-      n_head=2,
-      n_tail=2,
-      columns_subset=pb.col(pb.starts_with("item") | pb.matches("player"))
-    )
-    ```
-    """
-
-    if incl_header is None:
-        incl_header = global_config.preview_incl_header
-
-    # Make a copy of the data to avoid modifying the original
-    data = copy.deepcopy(data)
-
-    # Check that the n_head and n_tail aren't greater than the limit
-    if n_head + n_tail > limit:
-        raise ValueError(f"The sum of `n_head=` and `n_tail=` cannot exceed the limit ({limit}).")
-
-    # Do we have a DataFrame library to work with? We need at least one to display
-    # the table using Great Tables
-    _check_any_df_lib(method_used="preview_tbl")
-
-    # Set flag for whether the full dataset is shown, or just the head and tail; if the table
-    # is very small, the value likely will be `True`
-    full_dataset = False
-
-    # Determine if the table is a DataFrame or an Ibis table
-    tbl_type = _get_tbl_type(data=data)
-    ibis_tbl = "ibis.expr.types.relations.Table" in str(type(data))
-    pl_pb_tbl = "polars" in tbl_type or "pandas" in tbl_type
-
-    # Select the DataFrame library to use for displaying the Ibis table
-    df_lib_gt = _select_df_lib(preference="polars")
-    df_lib_name_gt = df_lib_gt.__name__
-
-    # If the table is a DataFrame (Pandas or Polars), set `df_lib_name_gt` to the name of the
-    # library (e.g., "polars" or "pandas")
-    if pl_pb_tbl:
-        df_lib_name_gt = "polars" if "polars" in tbl_type else "pandas"
-
-        # Handle imports of Polars or Pandas here
-        if df_lib_name_gt == "polars":
-            import polars as pl
-        else:
-            import pandas as pd
-
-    # If `columns_subset=` is not None, resolve the columns to display
-    if columns_subset is not None:
-
-        col_names = _get_column_names(data, ibis_tbl=ibis_tbl, df_lib_name_gt=df_lib_name_gt)
-
-        resolved_columns = _validate_columns_subset(
-            columns_subset=columns_subset, col_names=col_names
-        )
-
-        if len(resolved_columns) == 0:
-            raise ValueError(
-                "The `columns_subset=` value doesn't resolve to any columns in the table."
+        step_report = (
+            tbl_preview.tab_header(
+                title=html(f"Report for Validation Step {i} {check_mark_html}"),
+                subtitle=html(
+                    "<div>"
+                    "ASSERTION <span style='border-style: solid; border-width: thin; "
+                    "border-color: lightblue; padding-left: 2px; padding-right: 2px;'>"
+                    f"{text}</span><br><div style='padding-top: 3px;'>"
+                    f"<strong>{n}</strong> TEST UNITS <em>ALL PASSED</em> "
+                    f"IN COLUMN <strong>{column_position}</strong></div>"
+                    "<div style='padding-top: 10px;'>PREVIEW OF TARGET TABLE:"
+                    "</div></div>"
+                ),
             )
-
-        # Select the columns to display in the table with the `resolved_columns` value
-        data = _select_columns(
-            data, resolved_columns=resolved_columns, ibis_tbl=ibis_tbl, tbl_type=tbl_type
+            .tab_style(
+                style=[
+                    style.text(color="#006400"),
+                    style.fill(color="#4CA64C33"),
+                    style.borders(
+                        sides=["left", "right"],
+                        color="#1B4D3E80",
+                        style="solid",
+                        weight="2px",
+                    ),
+                ],
+                locations=loc.body(columns=column),
+            )
+            .tab_style(
+                style=style.borders(
+                    sides=["left", "right"], color="#1B4D3E80", style="solid", weight="2px"
+                ),
+                locations=loc.column_labels(columns=column),
+            )
         )
 
-    # From an Ibis table:
-    # - get the row count
-    # - subset the table to get the first and last n rows (if small, don't filter the table)
-    # - get the row numbers for the table
-    # - convert the table to a Polars or Pandas DF
-    if ibis_tbl:
-
-        # Get the Schema of the table
-        tbl_schema = Schema(tbl=data)
-
-        # Get the row count for the table
-        ibis_rows = data.count()
-        n_rows = ibis_rows.to_polars() if df_lib_name_gt == "polars" else int(ibis_rows.to_pandas())
-
-        # If n_head + n_tail is greater than the row count, display the entire table
-        if n_head + n_tail > n_rows:
-            full_dataset = True
-            data_subset = data
-            row_number_list = range(1, n_rows + 1)
-        else:
-            # Get the first and last n rows of the table
-            data_head = data.head(n=n_head)
-            row_numbers_head = range(1, n_head + 1)
-            data_tail = data[(n_rows - n_tail) : n_rows]
-            row_numbers_tail = range(n_rows - n_tail + 1, n_rows + 1)
-            data_subset = data_head.union(data_tail)
-            row_number_list = list(row_numbers_head) + list(row_numbers_tail)
-
-        # Convert either to Polars or Pandas depending on the available library
-        if df_lib_name_gt == "polars":
-            data = data_subset.to_polars()
-        else:
-            data = data_subset.to_pandas()
-
-    # From a DataFrame:
-    # - get the row count
-    # - subset the table to get the first and last n rows (if small, don't filter the table)
-    # - get the row numbers for the table
-    if pl_pb_tbl:
-
-        # Get the Schema of the table
-        tbl_schema = Schema(tbl=data)
-
-        if tbl_type == "polars":
-
-            n_rows = int(data.height)
-
-            # If n_head + n_tail is greater than the row count, display the entire table
-            if n_head + n_tail >= n_rows:
-                full_dataset = True
-                row_number_list = range(1, n_rows + 1)
-            else:
-                data = pl.concat([data.head(n=n_head), data.tail(n=n_tail)])
-
-                row_number_list = list(range(1, n_head + 1)) + list(
-                    range(n_rows - n_tail + 1, n_rows + 1)
-                )
-
-        if tbl_type == "pandas":
-
-            n_rows = data.shape[0]
-
-            # If n_head + n_tail is greater than the row count, display the entire table
-            if n_head + n_tail >= n_rows:
-                full_dataset = True
-                data_subset = data
-
-                row_number_list = range(1, n_rows + 1)
-            else:
-                data = pd.concat([data.head(n=n_head), data.tail(n=n_tail)])
-
-                row_number_list = list(range(1, n_head + 1)) + list(
-                    range(n_rows - n_tail + 1, n_rows + 1)
-                )
-
-    # From the table schema, get a list of tuples containing column names and data types
-    col_dtype_dict = tbl_schema.columns
-
-    # Extract the column names from the list of tuples (first element of each tuple)
-    col_names = [col[0] for col in col_dtype_dict]
-
-    # Iterate over the list of tuples and create a new dictionary with the
-    # column names and data types
-    col_dtype_dict = {k: v for k, v in col_dtype_dict}
-
-    # Create short versions of the data types by omitting any text in parentheses
-    col_dtype_dict_short = {
-        k: v.split("(")[0] if "(" in v else v for k, v in col_dtype_dict.items()
-    }
-
-    # Create a dictionary of column and row positions where the value is None/NA/NULL
-    # This is used to highlight these values in the table
-    if df_lib_name_gt == "polars":
-        none_values = {k: data[k].is_null().to_list() for k in col_names}
     else:
-        none_values = {k: data[k].isnull() for k in col_names}
+        # Create a preview of the extracted data
+        extract_preview = preview(
+            data=extract, n_head=1000, n_tail=1000, limit=2000, incl_header=False
+        )
 
-    none_values = [(k, i) for k, v in none_values.items() for i, val in enumerate(v) if val]
+        step_report = (
+            extract_preview.tab_header(
+                title=f"Report for Validation Step {i}",
+                subtitle=html(
+                    "<div>"
+                    "ASSERTION <span style='border-style: solid; border-width: thin; "
+                    "border-color: lightblue; padding-left: 2px; padding-right: 2px;'>"
+                    f"<code style='color: #303030;'>{text}</code></span><br>"
+                    f"<div style='padding-top: 3px;'><strong>{n_failed}</strong> / "
+                    f"<strong>{n}</strong> TEST UNIT FAILURES "
+                    f"IN COLUMN <strong>{column_position}</strong></div>"
+                    "<div style='padding-top: 10px;'>EXTRACT OF "
+                    f"<strong>{extract_length}</strong> ROWS WITH "
+                    "<span style='color: #B22222;'>TEST UNIT FAILURES IN RED</span>:"
+                    "</div></div>"
+                ),
+            )
+            .tab_style(
+                style=[
+                    style.text(color="#B22222"),
+                    style.fill(color="#FFC1C159"),
+                    style.borders(
+                        sides=["left", "right"], color="black", style="solid", weight="2px"
+                    ),
+                ],
+                locations=loc.body(columns=column),
+            )
+            .tab_style(
+                style=style.borders(
+                    sides=["left", "right"], color="black", style="solid", weight="2px"
+                ),
+                locations=loc.column_labels(columns=column),
+            )
+        )
 
-    # Import Great Tables to get preliminary renders of the columns
-    import great_tables as gt
+    return step_report
 
-    # For each of the columns get the average number of characters printed for each of the values
-    max_length_col_vals = []
 
-    for column in col_dtype_dict.keys():
+def _step_report_schema_complete_in_order(
+    step: int,
+    schema: Schema,
+    schema_target: Schema,
+    colnames_tgt: list,
+    dtypes_tgt: list,
+    all_passed: bool,
+):
+    """
+    This is the default case for schema validation where the schema is complete and in order.
+    - `complete=True`
+    - `in_order=True`
+    """
 
-        # Select a single column of values
-        data_col = data[[column]] if df_lib_name_gt == "pandas" else data.select([column])
+    # Create a Polars DF with the target table columns and dtypes
+    import polars as pl
 
-        # Using Great Tables, render the columns and get the list of values as formatted strings
-        built_gt = GT(data=data_col).fmt_markdown(columns=column)._build_data(context="html")
-        column_values = gt.gt._get_column_of_values(built_gt, column_name=column, context="html")
+    schema_tbl = pl.DataFrame(
+        {
+            "index_target": range(1, len(colnames_tgt) + 1),
+            "col_name_target": colnames_tgt,
+            "dtype_target": dtypes_tgt,
+        }
+    )
 
-        # Get the maximum number of characters in the column
-        max_length_col_vals.append(max([len(str(val)) for val in column_values]))
+    # Check and cross marks for the schema validation report
+    check_mark_html = "<span style='color: #4CA64C;'>&check;</span>"
+    cross_mark_html = "<span style='color: #CF142B;'>&cross;</span>"
 
-    length_col_names = [len(column) for column in col_dtype_dict.keys()]
-    length_data_types = [len(dtype) for dtype in col_dtype_dict_short.values()]
+    passing_symbol = check_mark_html if all_passed else cross_mark_html
 
-    # Comparing the length of the column names, the data types, and the max length of the
-    # column values, prefer the largest of these for the column widths (by column)
-    col_widths = [
-        f"{round(min(max(7.8 * max_length_col_vals[i] + 10, 7.8 * length_col_names[i] + 10, 7.8 * length_data_types[i] + 10), max_col_width))}px"
-        for i in range(len(col_dtype_dict.keys()))
+    # Is the number of column names supplied equal to the number of columns in the
+    # target table?
+    if len(schema.columns) > len(schema_target.columns):
+
+        schema_length = "longer"
+        difference = len(schema.columns) - len(schema_target.columns)
+
+        # Get indices of the extra rows in the schema table
+        extra_rows_i = list(range(len(schema_target.columns), len(schema.columns)))
+
+    elif len(schema.columns) < len(schema_target.columns):
+
+        schema_length = "shorter"
+        difference = len(schema_target.columns) - len(schema.columns)
+
+        # Get indices of the extra rows (on the target side) in the schema table
+        extra_rows_i = list(range(len(schema.columns), len(schema_target.columns)))
+
+    else:
+
+        schema_length = "equal"
+        difference = 0
+        extra_rows_i = []
+
+    # Get the expected column names and dtypes
+    colnames_exp = [x[0] for x in schema.columns]
+
+    # The dtype is optional and might be None, so we need to convert it to a string;
+    # however, if there is a list object, keep it a list
+    dtypes_exp = [
+        (
+            x[1]
+            if len(x) > 1 and isinstance(x[1], list)
+            else (str(x[1]) if len(x) > 1 and x[1] is not None else "None")
+        )
+        for x in schema.columns
     ]
 
-    # Set the column width to the col_widths list
-    col_width_dict = {k: v for k, v in zip(col_names, col_widths)}
+    # Get indices of column name differences between `colnames_tgt` and `colnames_exp`
+    colname_diffs = [
+        i
+        for i, (col_tgt, col_exp) in enumerate(zip(colnames_tgt, colnames_exp))
+        if col_tgt != col_exp
+    ]
 
-    # For each of the values in the dictionary, prepend the column name to the data type
-    col_dtype_labels_dict = {
-        k: html(
-            f"<div><div style='white-space: nowrap; text-overflow: ellipsis; overflow: hidden; "
-            f"padding-bottom: 2px; margin-bottom: 2px;'>{k}</div><div style='white-space: nowrap; "
-            f"text-overflow: ellipsis; overflow: hidden; padding-top: 2px; margin-top: 2px;'>"
-            f"<em>{v}</em></div></div>"
+    # For dtypes, get the indices of differences between `dtypes_tgt` and `dtypes_exp`
+    # and note that `dtypes_exp` could be a list of strings and any of those strings
+    # could match `dtypes_tgt` and return a valid result (i.e., allow multiple attempts)
+    dtypes_diffs = [
+        i
+        for i, dtype_exp in enumerate(dtypes_exp)
+        if dtype_exp != "None"
+        and (
+            (isinstance(dtype_exp, list) and not any(item in dtypes_tgt for item in dtype_exp))
+            or (
+                not isinstance(dtype_exp, list)
+                and not any(dtype_tgt == dtype_exp for dtype_tgt in dtypes_tgt)
+            )
         )
-        for k, v in col_dtype_dict_short.items()
-    }
+    ]
 
-    # Prepend a column that contains the row numbers if `show_row_numbers=True`
-    if show_row_numbers:
+    # Create a list of column names with check marks or cross marks based on the
+    # presence of the column name in the expected schema (all check marks for length
+    # of `colnames_tgt` and cross marks for the differences found in colname_diffs)
+    colnames_tgt_eval = [
+        check_mark_html if i not in colname_diffs else cross_mark_html
+        for i in range(len(colnames_tgt))
+    ]
 
-        if df_lib_name_gt == "polars":
+    # Create a list of dtypes with check marks or cross marks based on the presence of
+    # the dtype in the expected schema (all check marks for length of `dtypes_tgt` and
+    # cross marks for the differences found in `dtypes_diffs`)
+    dtypes_tgt_eval = [
+        check_mark_html if i not in dtypes_diffs else cross_mark_html
+        for i in range(len(dtypes_tgt))
+    ]
 
-            import polars as pl
+    # If the a `col_name_exp_correct` value is a cross mark, then the corresponding
+    # `dtype_exp_correct` entry should be an empty string (since the column name is not
+    # correct, the dtype is not relevant)
+    dtypes_tgt_eval = [
+        ("" if colnames_tgt_eval[i] == cross_mark_html else dtypes_tgt_eval[i])
+        for i in range(len(colnames_tgt_eval))
+    ]
 
-            row_number_series = pl.Series("_row_num_", row_number_list)
-            data = data.insert_column(0, row_number_series)
+    # `dtypes_exp` could be a list of strings, we need ensure those entries are strings
+    # with the data types being pipe separated
+    dtypes_exp_flat = [
+        " | ".join(dtype_exp) if isinstance(dtype_exp, list) else dtype_exp
+        for dtype_exp in dtypes_exp
+    ]
 
-        if df_lib_name_gt == "pandas":
+    # Replace instances of "None" with an empty string in `dtypes_exp_flat`
+    dtypes_exp_flat = ["" if dtype == "None" else dtype for dtype in dtypes_exp_flat]
 
-            data.insert(0, "_row_num_", row_number_list)
+    # Create a Polars DF with the expected columns and dtypes, fill in the missing
+    # columns (ending with `_correct`) with empty strings (if schema_length is "longer")
+    if schema_length == "longer":
+        colnames_tgt_eval += [cross_mark_html] * difference
+        dtypes_tgt_eval += [""] * difference
 
-        # Get the highest number in the `row_number_list` and calculate a width that will
-        # safely fit a number of that magnitude
-        max_row_num = max(row_number_list)
-        max_row_num_width = len(str(max_row_num)) * 7.8 + 10
+    if schema_length == "shorter":
 
-        # Update the col_width_dict to include the row number column
-        col_width_dict = {"_row_num_": f"{max_row_num_width}px"} | col_width_dict
-        # Update the col_dtype_labels_dict to include the row number column (use empty string)
-        col_dtype_labels_dict = {"_row_num_": ""} | col_dtype_labels_dict
+        max_length = len(colnames_exp)
 
-        # Create the label, table type, and thresholds HTML fragments
-        table_type_html = _create_table_type_html(
-            tbl_type=tbl_type, tbl_name=None, font_size="10px"
-        )
+        # Truncate `colnames_exp` and `dtypes_exp_flat` to the `max_length` value
+        colnames_tgt_eval = colnames_tgt_eval[:max_length]
+        dtypes_tgt_eval = dtypes_tgt_eval[:max_length]
 
-        tbl_dims_html = _create_table_dims_html(
-            columns=len(col_names), rows=n_rows, font_size="10px"
-        )
+    # If dtypes_exp_flat is `""` then `dtypes_tgt_eval` should also be `""`
+    dtypes_tgt_eval = [
+        ("" if dtypes_exp_flat[i] == "" else dtypes_tgt_eval[i])
+        for i in range(len(dtypes_tgt_eval))
+    ]
 
-        # Compose the subtitle HTML fragment
-        combined_subtitle = (
-            "<div>"
-            '<div style="padding-top: 0; padding-bottom: 7px;">'
-            f"{table_type_html}"
-            f"{tbl_dims_html}"
-            "</div>"
-            "</div>"
-        )
-
-    gt_tbl = (
-        GT(data=data, id="pb_preview_tbl")
-        .opt_table_font(font=google_font(name="IBM Plex Sans"))
-        .opt_align_table_header(align="left")
-        .fmt_markdown(columns=col_names)
-        .tab_style(
-            style=style.css(
-                "height: 14px; padding: 4px; white-space: nowrap; text-overflow: "
-                "ellipsis; overflow: hidden;"
-            ),
-            locations=loc.body(),
-        )
-        .tab_style(
-            style=style.text(color="black", font=google_font(name="IBM Plex Mono"), size="12px"),
-            locations=loc.body(),
-        )
-        .tab_style(
-            style=style.text(color="gray20", font=google_font(name="IBM Plex Mono"), size="12px"),
-            locations=loc.column_labels(),
-        )
-        .tab_style(
-            style=style.borders(
-                sides=["top", "bottom"], color="#E9E9E", style="solid", weight="1px"
-            ),
-            locations=loc.body(),
-        )
-        .tab_options(
-            table_body_vlines_style="solid",
-            table_body_vlines_width="1px",
-            table_body_vlines_color="#E9E9E9",
-            column_labels_vlines_style="solid",
-            column_labels_vlines_width="1px",
-            column_labels_vlines_color="#F2F2F2",
-        )
-        .cols_label(cases=col_dtype_labels_dict)
-        .cols_width(cases=col_width_dict)
+    schema_exp = pl.DataFrame(
+        {
+            "index_exp": range(1, len(colnames_exp) + 1),
+            "col_name_exp": colnames_exp,
+            "col_name_exp_correct": colnames_tgt_eval,
+            "dtype_exp": dtypes_exp_flat,
+            "dtype_exp_correct": dtypes_tgt_eval,
+        }
     )
 
-    if incl_header:
-        gt_tbl = gt_tbl.tab_header(title=html(combined_subtitle))
-        gt_tbl = gt_tbl.tab_options(heading_subtitle_font_size="12px")
+    # Concatenate the tables horizontally
+    schema_combined = pl.concat([schema_tbl, schema_exp], how="horizontal")
 
-    if none_values:
-        for column, none_index in none_values:
-            gt_tbl = gt_tbl.tab_style(
-                style=[style.text(color="#B22222"), style.fill(color="#FFC1C159")],
-                locations=loc.body(rows=none_index, columns=column),
-            )
+    # Generate text for the `col_schema_match()` parameters
+    col_schema_match_params_html = _create_col_schema_match_params_html(
+        complete=True, in_order=True
+    )
 
-        if tbl_type == "pandas":
-            gt_tbl = gt_tbl.sub_missing(missing_text="NA")
-
-        if ibis_tbl:
-            gt_tbl = gt_tbl.sub_missing(missing_text="NULL")
-
-    if not full_dataset:
-
-        gt_tbl = gt_tbl.tab_style(
-            style=style.borders(sides="bottom", color="#6699CC80", style="solid", weight="2px"),
-            locations=loc.body(rows=n_head - 1),
+    step_report = (
+        GT(schema_combined, id="pb_step_tbl")
+        .tab_header(
+            title=html(f"Report for Validation Step {step} {passing_symbol}"),
+            subtitle=html(col_schema_match_params_html),
         )
-
-    if show_row_numbers:
-
-        gt_tbl = gt_tbl.tab_style(
-            style=[
-                style.text(color="gray", font=google_font(name="IBM Plex Mono"), size="10px"),
-                style.borders(sides="right", color="#6699CC80", style="solid", weight="2px"),
+        .fmt_markdown(columns=None)
+        .opt_table_font(font=google_font(name="IBM Plex Sans"))
+        .opt_align_table_header(align="left")
+        .cols_label(
+            cases={
+                "index_target": "",
+                "col_name_target": "COLUMN",
+                "dtype_target": "DTYPE",
+                "index_exp": "",
+                "col_name_exp": "COLUMN",
+                "col_name_exp_correct": "",
+                "dtype_exp": "DTYPE",
+                "dtype_exp_correct": "",
+            }
+        )
+        .cols_width(
+            cases={
+                "index_target": "40px",
+                "col_name_target": "190px",
+                "dtype_target": "190px",
+                "index_exp": "40px",
+                "col_name_exp": "190px",
+                "col_name_exp_correct": "30px",
+                "dtype_exp": "190px",
+                "dtype_exp_correct": "30px",
+            }
+        )
+        .tab_style(
+            style=style.text(color="black", font=google_font(name="IBM Plex Mono"), size="13px"),
+            locations=loc.body(
+                columns=["col_name_target", "dtype_target", "col_name_exp", "dtype_exp"]
+            ),
+        )
+        .tab_style(
+            style=style.text(size="13px"),
+            locations=loc.body(columns=["index_target", "index_exp"]),
+        )
+        .tab_style(
+            style=style.borders(sides="left", color="#E5E5E5", style="double", weight="3px"),
+            locations=loc.body(columns="index_exp"),
+        )
+        .tab_style(
+            style=style.css("white-space: nowrap; text-overflow: ellipsis; overflow: hidden;"),
+            locations=loc.body(
+                columns=["col_name_target", "dtype_target", "col_name_exp", "dtype_exp"]
+            ),
+        )
+        .tab_spanner(
+            label="TARGET",
+            columns=["index_target", "col_name_target", "dtype_target"],
+        )
+        .tab_spanner(
+            label="EXPECTED",
+            columns=[
+                "index_exp",
+                "col_name_exp",
+                "col_name_exp_correct",
+                "dtype_exp",
+                "dtype_exp_correct",
             ],
-            locations=loc.body(columns="_row_num_"),
+        )
+        .sub_missing(
+            columns=[
+                "index_target",
+                "col_name_target",
+                "dtype_target",
+                "index_exp",
+                "col_name_exp",
+                "col_name_exp_correct",
+                "dtype_exp",
+                "dtype_exp_correct",
+            ],
+            missing_text="",
+        )
+        .tab_source_note(
+            source_note=html(
+                "<div style='padding-bottom: 2px;'>Supplied Column Schema:</div>"
+                f"<div style='border-style: solid; border-width: thin; border-color: lightblue; padding-left: 2px; padding-right: 2px; padding-bottom: 3px;'><code style='color: #303030; font-family: monospace; font-size: 8px;'>{schema.columns}</code></div>"
+            )
+        )
+        .tab_options(source_notes_font_size="12px")
+    )
+
+    if schema_length == "shorter":
+
+        # Add background color to the missing column on the exp side
+        step_report = step_report.tab_style(
+            style=style.fill(color="#F3F3F3"),
+            locations=loc.body(
+                columns=[
+                    "index_exp",
+                    "col_name_exp",
+                    "col_name_exp_correct",
+                    "dtype_exp",
+                    "dtype_exp_correct",
+                ],
+                rows=extra_rows_i,
+            ),
         )
 
-    return gt_tbl
+    if schema_length == "longer":
+
+        # Add background color to the missing column on the target side
+        step_report = step_report.tab_style(
+            style=style.fill(color="#F3F3F3"),
+            locations=loc.body(
+                columns=[
+                    "index_target",
+                    "col_name_target",
+                    "dtype_target",
+                ],
+                rows=extra_rows_i,
+            ),
+        )
+
+        # Add a border below the row that terminates the target table schema
+        step_report = step_report.tab_style(
+            style=style.borders(sides="bottom", color="#6699CC80", style="solid", weight="1px"),
+            locations=loc.body(rows=len(colnames_tgt) - 1),
+        )
+
+    return step_report
 
 
-def _get_column_names(data: FrameT | Any, ibis_tbl: bool, df_lib_name_gt: str) -> list[str]:
-    if ibis_tbl:
-        return data.columns if df_lib_name_gt == "polars" else list(data.columns)
-    return list(data.columns)
-
-
-def _validate_columns_subset(
-    columns_subset: str | list[str] | Column, col_names: list[str]
-) -> list[str]:
-    if isinstance(columns_subset, str):
-        if columns_subset not in col_names:
-            raise ValueError("The `columns_subset=` value doesn't match any columns in the table.")
-        return [columns_subset]
-
-    if isinstance(columns_subset, list):
-        if all(isinstance(col, str) for col in columns_subset):
-            if not all(col in col_names for col in columns_subset):
-                raise ValueError(
-                    "Not all columns provided as `columns_subset=` match the table's columns."
-                )
-            return columns_subset
-
-    return columns_subset.resolve(columns=col_names)
-
-
-def _select_columns(
-    data: FrameT | Any, resolved_columns: list[str], ibis_tbl: bool, tbl_type: str
-) -> FrameT | Any:
-    if ibis_tbl:
-        return data[resolved_columns]
-    if tbl_type == "polars":
-        return data.select(resolved_columns)
-    return data[resolved_columns]
-
-
-def get_column_count(data: FrameT | Any) -> int:
+def _step_report_schema_complete_any_order(
+    step: int, schema: Schema, schema_target: Schema, all_passed: bool
+):
     """
-    Get the number of columns in a table.
-
-    The `get_column_count()` function returns the number of columns in a table. The function works
-    with any table that is supported by the `pointblank` library, including Pandas, Polars, and Ibis
-    backend tables (e.g., DuckDB, MySQL, PostgreSQL, SQLite, Parquet, etc.).
-
-    Parameters
-    ----------
-    data
-        The table for which to get the column count, which could be a DataFrame object or an Ibis
-        table object. Read the *Supported Input Table Types* section for details on the supported
-        table types.
-
-    Returns
-    -------
-    int
-        The number of columns in the table.
-
-    Supported Input Table Types
-    ---------------------------
-    The `data=` parameter can be given any of the following table types:
-
-    - Polars DataFrame (`"polars"`)
-    - Pandas DataFrame (`"pandas"`)
-    - DuckDB table (`"duckdb"`)*
-    - MySQL table (`"mysql"`)*
-    - PostgreSQL table (`"postgresql"`)*
-    - SQLite table (`"sqlite"`)*
-    - Parquet table (`"parquet"`)*
-
-    The table types marked with an asterisk need to be prepared as Ibis tables (with type of
-    `ibis.expr.types.relations.Table`). Furthermore, using `get_column_count()` with these types of
-    tables requires the Ibis library (`v9.5.0` or above) to be installed. If the input table is a
-    Polars or Pandas DataFrame, the availability of Ibis is not needed.
-
-    Examples
-    --------
-    To get the number of columns in a table, we can use the `get_column_count()` function. Here's an
-    example using the `small_table` dataset (itself loaded using the `load_dataset()` function):
-
-    ```{python}
-    import pointblank as pb
-
-    small_table_polars = pb.load_dataset("small_table")
-
-    pb.get_column_count(small_table_polars)
-    ```
-
-    This table is a Polars DataFrame, but the `get_column_count()` function works with any table
-    supported by `pointblank`, including Pandas DataFrames and Ibis backend tables. Here's an
-    example using a DuckDB table handled by Ibis:
-
-    ```{python}
-    small_table_duckdb = pb.load_dataset("small_table", tbl_type="duckdb")
-
-    pb.get_column_count(small_table_duckdb)
-    ```
-
-    The function always returns the number of columns in the table as an integer value, which is
-    `8` for the `small_table` dataset.
+    This is the case for schema validation where the schema is complete and order is disregarded.
+    - `complete=True`
+    - `in_order=False`
     """
 
-    if "ibis.expr.types.relations.Table" in str(type(data)):
-        return len(data.columns)
+    # Check and cross marks for the schema validation report
+    check_mark_html = "<span style='color: #4CA64C;'>&check;</span>"
+    cross_mark_html = "<span style='color: #CF142B;'>&cross;</span>"
 
-    elif "polars" in str(type(data)):
-        return len(data.columns)
+    colnames_tgt = [x[0] for x in schema_target.columns]
+    dtypes_tgt = [str(x[1]) for x in schema_target.columns]
 
-    elif "pandas" in str(type(data)):
-        return data.shape[1]
+    passing_symbol = check_mark_html if all_passed else cross_mark_html
+
+    # Create a Polars DF with the target table columns and dtypes
+    import polars as pl
+
+    schema_tbl = pl.DataFrame(
+        {
+            "index_target": range(1, len(colnames_tgt) + 1),
+            "col_name_target": colnames_tgt,
+            "dtype_target": dtypes_tgt,
+        }
+    )
+
+    colnames_exp = [x[0] for x in schema.columns]
+
+    # The dtype is optional and might be None, so we need to convert it to a string;
+    # however, if there is a list object, keep it a list
+    dtypes_exp = [
+        (
+            x[1]
+            if len(x) > 1 and isinstance(x[1], list)
+            else (str(x[1]) if len(x) > 1 and x[1] is not None else "None")
+        )
+        for x in schema.columns
+    ]
+
+    # Get which colnames in `colnames_exp` that matched with `colnames_tgt`
+    colnames_exp_matched = [
+        col_exp for col_exp in colnames_exp if any(col_exp == col_tgt for col_tgt in colnames_tgt)
+    ]
+
+    # Get the dtypes for the matched column names
+    dtypes_exp_matched = [
+        dtypes_exp[colnames_exp.index(col_exp)] for col_exp in colnames_exp_matched
+    ]
+
+    # For any 'None' strings in `dtypes_exp_matched`, replace them with an empty string
+    dtypes_exp_matched = ["" if dtype == "None" else dtype for dtype in dtypes_exp_matched]
+
+    # Create a dictionary for expected column data types
+    dtypes_exp_dict = {
+        col[0]: col[1] if len(col) > 1 else "None"
+        for col in schema.columns
+        if col[0] in [col[0] for col in schema_target.columns]
+    }
+
+    # Initialize a list to store indices of columns with dtype differences
+    dtypes_diffs = []
+
+    # Iterate over target columns and compare data types
+    for i, (colname_tgt, dtype_tgt) in enumerate(schema_target.columns):
+        dtype_exp = dtypes_exp_dict.get(colname_tgt)
+        if dtype_exp is not None and dtype_exp != "None":
+            if isinstance(dtype_exp, list):
+                if not any(item == dtype_tgt for item in dtype_exp):
+                    dtypes_diffs.append(colname_tgt)
+            elif dtype_exp != dtype_tgt:
+                dtypes_diffs.append(colname_tgt)
+
+    # Map the column names back to the col_exp sequence
+    dtypes_diffs_exp_indices = [
+        schema.columns.index((colname, dtypes_exp_dict[colname])) for colname in dtypes_diffs
+    ]
+
+    # Sort the list of indices
+    dtypes_diffs_exp_indices.sort()
+
+    # Create a list of dtypes with check marks or cross marks based on the presence of
+    # the dtype in the expected schema (all check marks for length of `dtypes_tgt` and
+    # cross marks for the differences found in `dtypes_diffs`); this has to be in the
+    # order of `colnames_exp_matched`
+    dtypes_exp_matched_eval = [
+        check_mark_html if i not in dtypes_diffs_exp_indices else cross_mark_html
+        for i in range(len(colnames_exp_matched))
+    ]
+
+    # If there is an empty string in `dtypes_exp_matched`, then the corresponding
+    # `dtypes_exp_matched_eval` entry should also be an empty string
+    dtypes_exp_matched_eval = [
+        ("" if dtypes_exp_matched[i] == "" else dtypes_exp_matched_eval[i])
+        for i in range(len(colnames_exp_matched))
+    ]
+
+    # The unmatched column names are the ones that are not in `colnames_exp_matched`
+    colnames_exp_unmatched = [
+        col_exp for col_exp in colnames_exp if col_exp not in colnames_exp_matched
+    ]
+
+    # `dtypes_exp_matched` could be a list of strings, we need ensure those entries are strings
+    # with the data types being pipe separated
+    dtypes_exp_matched = [
+        " | ".join(dtype_exp) if isinstance(dtype_exp, list) else dtype_exp
+        for dtype_exp in dtypes_exp_matched
+    ]
+
+    # Get the indices of the unmatched columns by comparing the `colnames_exp` list
+    # against the schema order
+    index_exp = [i for i, col_exp in enumerate(colnames_exp) if col_exp in colnames_exp_matched]
+
+    # Add 1 to the indices of `index_exp`
+    index_exp = [i + 1 for i in index_exp]
+
+    # Create a DataFrame with the expected column names and dtypes
+    schema_exp = pl.DataFrame(
+        {
+            "index_exp": index_exp,
+            "col_name_exp": colnames_exp_matched,
+            "col_name_exp_correct": [check_mark_html] * len(colnames_exp_matched),
+            "dtype_exp": dtypes_exp_matched,
+            "dtype_exp_correct": dtypes_exp_matched_eval,
+        }
+    )
+
+    if len(colnames_exp_matched) > 0:
+
+        # Join the tables (`schema_tbl` and `schema_exp`) by the `col_name_exp` and
+        # `col_name_target` columnss
+        schema_combined = schema_tbl.join(
+            schema_exp,
+            how="left",
+            left_on="col_name_target",
+            right_on="col_name_exp",
+            coalesce=False,
+        )
 
     else:
-        raise ValueError("The input table type supplied in `data=` is not supported.")
+        schema_combined = pl.DataFrame(
+            {
+                "index_target": range(1, len(colnames_tgt) + 1),
+                "col_name_target": colnames_tgt,
+                "dtype_target": dtypes_tgt,
+                "index_exp": [None] * len(colnames_tgt),
+                "col_name_exp": [""] * len(colnames_tgt),
+                "col_name_exp_correct": [""] * len(colnames_tgt),
+                "dtype_exp": [""] * len(colnames_tgt),
+                "dtype_exp_correct": [""] * len(colnames_tgt),
+            }
+        )
+
+        # Cast the index_exp column to an integer type
+        schema_combined = schema_combined.with_columns(pl.col("index_exp").cast(pl.Int64))
+
+    # If there are unmatched column names, then create a seprate DataFrame for those
+    # entries and concatenate it with the `schema_combined` DataFrame
+    if len(colnames_exp_unmatched) > 0:
+
+        # Get the indices of the unmatched columns by comparing the
+        # `colnames_exp_unmatched` against the schema order
+        index_exp_unmatched = [
+            i for i, col_exp in enumerate(colnames_exp) if col_exp in colnames_exp_unmatched
+        ]
+
+        # Add 1 to the indices of `index_exp_unmatched`
+        index_exp_unmatched = [i + 1 for i in index_exp_unmatched]
+
+        # Get the dtypes of the unmatched columns
+        dtypes_exp_unmatched = [
+            dtypes_exp[colnames_exp.index(col_exp)] for col_exp in colnames_exp_unmatched
+        ]
+
+        # `dtypes_exp_unmatched` could be a list of strings, we need ensure those entries are strings
+        # with the data types being pipe separated
+        dtypes_exp_unmatched = [
+            " | ".join(dtype_exp) if isinstance(dtype_exp, list) else dtype_exp
+            for dtype_exp in dtypes_exp_unmatched
+        ]
+
+        schema_exp_unmatched = pl.DataFrame(
+            {
+                "index_target": [None] * len(colnames_exp_unmatched),
+                "col_name_target": [""] * len(colnames_exp_unmatched),
+                "dtype_target": [""] * len(colnames_exp_unmatched),
+                "index_exp": index_exp_unmatched,
+                "col_name_exp": colnames_exp_unmatched,
+                "col_name_exp_correct": [cross_mark_html] * len(colnames_exp_unmatched),
+                "dtype_exp": dtypes_exp_unmatched,
+                "dtype_exp_correct": [""] * len(colnames_exp_unmatched),
+            }
+        )
+
+        # Concatenate the tables vertically
+        schema_combined = pl.concat([schema_combined, schema_exp_unmatched], how="vertical")
+
+    # Generate text for the `col_schema_match()` parameters
+    col_schema_match_params_html = _create_col_schema_match_params_html(
+        complete=True, in_order=False
+    )
+
+    step_report = (
+        GT(schema_combined, id="pb_step_tbl")
+        .tab_header(
+            title=html(f"Report for Validation Step {step} {passing_symbol}"),
+            subtitle=html(col_schema_match_params_html),
+        )
+        .fmt_markdown(columns=None)
+        .opt_table_font(font=google_font(name="IBM Plex Sans"))
+        .opt_align_table_header(align="left")
+        .cols_label(
+            cases={
+                "index_target": "",
+                "col_name_target": "COLUMN",
+                "dtype_target": "DTYPE",
+                "index_exp": "",
+                "col_name_exp": "COLUMN",
+                "col_name_exp_correct": "",
+                "dtype_exp": "DTYPE",
+                "dtype_exp_correct": "",
+            }
+        )
+        .cols_width(
+            cases={
+                "index_target": "40px",
+                "col_name_target": "190px",
+                "dtype_target": "190px",
+                "index_exp": "40px",
+                "col_name_exp": "190px",
+                "col_name_exp_correct": "30px",
+                "dtype_exp": "190px",
+                "dtype_exp_correct": "30px",
+            }
+        )
+        .tab_style(
+            style=style.text(color="black", font=google_font(name="IBM Plex Mono"), size="13px"),
+            locations=loc.body(
+                columns=["col_name_target", "dtype_target", "col_name_exp", "dtype_exp"]
+            ),
+        )
+        .tab_style(
+            style=style.text(size="13px"),
+            locations=loc.body(columns=["index_target", "index_exp"]),
+        )
+        .tab_style(
+            style=style.borders(sides="left", color="#E5E5E5", style="double", weight="3px"),
+            locations=loc.body(columns="index_exp"),
+        )
+        .tab_style(
+            style=style.css("white-space: nowrap; text-overflow: ellipsis; overflow: hidden;"),
+            locations=loc.body(
+                columns=["col_name_target", "dtype_target", "col_name_exp", "dtype_exp"]
+            ),
+        )
+        .tab_spanner(
+            label="TARGET",
+            columns=["index_target", "col_name_target", "dtype_target"],
+        )
+        .tab_spanner(
+            label="EXPECTED",
+            columns=[
+                "index_exp",
+                "col_name_exp",
+                "col_name_exp_correct",
+                "dtype_exp",
+                "dtype_exp_correct",
+            ],
+        )
+        .sub_missing(
+            columns=[
+                "index_target",
+                "col_name_target",
+                "dtype_target",
+                "index_exp",
+                "col_name_exp",
+                "col_name_exp_correct",
+                "dtype_exp",
+                "dtype_exp_correct",
+            ],
+            missing_text="",
+        )
+        .tab_source_note(
+            source_note=html(
+                "<div style='padding-bottom: 2px;'>Supplied Column Schema:</div>"
+                f"<div style='border-style: solid; border-width: thin; border-color: lightblue; padding-left: 2px; padding-right: 2px; padding-bottom: 3px;'><code style='color: #303030; font-family: monospace; font-size: 8px;'>{schema.columns}</code></div>"
+            )
+        )
+        .tab_options(source_notes_font_size="12px")
+    )
+
+    # Add background color to the missing column on the exp side
+    if len(colnames_exp_unmatched) > 0:
+
+        # Get the indices of the unmatched columns by comparing the `colnames_exp_unmatched`
+        # against the schema order
+        index_exp_unmatched = [
+            i for i, col_exp in enumerate(colnames_exp) if col_exp in colnames_exp_unmatched
+        ]
+
+        # Add 1 to the indices of `index_exp_unmatched`
+        index_exp_unmatched = [i + 1 for i in index_exp_unmatched]
+
+        # Add background color to the missing column on the tgt side
+        step_report = step_report.tab_style(
+            style=style.fill(color="#F3F3F3"),
+            locations=loc.body(
+                columns=[
+                    "index_target",
+                    "col_name_target",
+                    "dtype_target",
+                ],
+                rows=index_exp_unmatched,
+            ),
+        )
+
+        # Add a border below the row that terminates the target table schema
+        step_report = step_report.tab_style(
+            style=style.borders(sides="bottom", color="#6699CC80", style="solid", weight="1px"),
+            locations=loc.body(rows=len(colnames_tgt) - 1),
+        )
+
+    return step_report
 
 
-def get_row_count(data: FrameT | Any) -> int:
-    """
-    Get the number of rows in a table.
+def _create_label_text_html(
+    text: str,
+    strikethrough: bool = False,
+    strikethrough_color: str = "#DC143C",
+    border_width: str = "1px",
+    border_color: str = "#87CEFA",
+    border_radius: str = "5px",
+    background_color: str = "#F0F8FF",
+    font_size: str = "x-small",
+    padding_left: str = "4px",
+    padding_right: str = "4px",
+    margin_left: str = "5px",
+    margin_right: str = "5px",
+    margin_top: str = "2px",
+) -> str:
 
-    The `get_row_count()` function returns the number of rows in a table. The function works with
-    any table that is supported by the `pointblank` library, including Pandas, Polars, and Ibis
-    backend tables (e.g., DuckDB, MySQL, PostgreSQL, SQLite, Parquet, etc.).
-
-    Parameters
-    ----------
-    data
-        The table for which to get the row count, which could be a DataFrame object or an Ibis table
-        object. Read the *Supported Input Table Types* section for details on the supported table
-        types.
-
-    Returns
-    -------
-    int
-        The number of rows in the table.
-
-    Supported Input Table Types
-    ---------------------------
-    The `data=` parameter can be given any of the following table types:
-
-    - Polars DataFrame (`"polars"`)
-    - Pandas DataFrame (`"pandas"`)
-    - DuckDB table (`"duckdb"`)*
-    - MySQL table (`"mysql"`)*
-    - PostgreSQL table (`"postgresql"`)*
-    - SQLite table (`"sqlite"`)*
-    - Parquet table (`"parquet"`)*
-
-    The table types marked with an asterisk need to be prepared as Ibis tables (with type of
-    `ibis.expr.types.relations.Table`). Furthermore, using `get_row_count()` with these types of
-    tables requires the Ibis library (`v9.5.0` or above) to be installed. If the input table is a
-    Polars or Pandas DataFrame, the availability of Ibis is not needed.
-
-    Examples
-    --------
-    Getting the number of rows in a table is easily done by using the `get_row_count()` function.
-    Here's an example using the `game_revenue` dataset (itself loaded using the `load_dataset()`
-    function):
-
-    ```{python}
-    import pointblank as pb
-
-    game_revenue_polars = pb.load_dataset("game_revenue")
-
-    pb.get_row_count(game_revenue_polars)
-    ```
-
-    This table is a Polars DataFrame, but the `get_row_count()` function works with any table
-    supported by `pointblank`, including Pandas DataFrames and Ibis backend tables. Here's an
-    example using a DuckDB table handled by Ibis:
-
-    ```{python}
-    game_revenue_duckdb = pb.load_dataset("game_revenue", tbl_type="duckdb")
-
-    pb.get_row_count(game_revenue_duckdb)
-    ```
-
-    The function always returns the number of rows in the table as an integer value, which is `2000`
-    for the `game_revenue` dataset.
-    """
-
-    if "ibis.expr.types.relations.Table" in str(type(data)):
-
-        # Determine whether Pandas or Polars is available to get the row count
-        _check_any_df_lib(method_used="get_row_count")
-
-        # Select the DataFrame library to use for displaying the Ibis table
-        df_lib = _select_df_lib(preference="polars")
-        df_lib_name = df_lib.__name__
-
-        if df_lib_name == "pandas":
-            return int(data.count().to_pandas())
-        else:
-            return int(data.count().to_polars())
-
-    elif "polars" in str(type(data)):
-        return int(data.height)
-
-    elif "pandas" in str(type(data)):
-        return data.shape[0]
-
+    if strikethrough:
+        strikethrough_rules = (
+            f" text-decoration: line-through; text-decoration-color: {strikethrough_color};"
+        )
     else:
-        raise ValueError("The input table type supplied in `data=` is not supported.")
+        strikethrough_rules = ""
+
+    return f'<div style="border-style: solid; border-width: {border_width}; border-color: {border_color}; border-radius: {border_radius}; background-color: {background_color}; font-size: {font_size}; padding-left: {padding_left}; padding-right: {padding_right}; margin-left: {margin_left}; margin-right: {margin_right};  margin-top: {margin_top}; {strikethrough_rules}">{text}</div>'
+
+
+def _create_col_schema_match_params_html(
+    complete: bool = True,
+    in_order: bool = True,
+) -> str:
+
+    complete_text = _create_label_text_html(
+        text="COMPLETE",
+        strikethrough=not complete,
+        strikethrough_color="steelblue",
+    )
+
+    in_order_text = _create_label_text_html(
+        text="IN ORDER",
+        strikethrough=not in_order,
+        strikethrough_color="steelblue",
+    )
+
+    return f'<div style="display: flex;"><div style="margin-right: 5px;">COLUMN SCHEMA MATCH</div>{complete_text}{in_order_text}</div>'

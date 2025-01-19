@@ -104,10 +104,11 @@ quartodoc:
         can split the data based on the validation results (with `get_sundered_data()`).
       contents:
         - name: Validate.interrogate
-        - name: Validate.get_data_extracts
-        - name: Validate.get_json_report
         - name: Validate.get_tabular_report
+        - name: Validate.get_step_report
+        - name: Validate.get_json_report
         - name: Validate.get_sundered_data
+        - name: Validate.get_data_extracts
         - name: Validate.all_passed
         - name: Validate.n
         - name: Validate.n_passed
@@ -119,7 +120,7 @@ quartodoc:
         - name: Validate.notify
     - title: Utilities
       desc: >
-        The utilities group contain functions that are helpful for the validation process. We can
+        The utilities group contains functions that are helpful for the validation process. We can
         load datasets with `load_dataset()`, preview a table with `preview()`, and set global
         configuration parameters with `config()`.
       contents:
